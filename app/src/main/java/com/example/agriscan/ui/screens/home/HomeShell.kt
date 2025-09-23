@@ -91,8 +91,12 @@ fun HomeShell(
             composable(HomeTab.Scan.route) {
                 ScanScreen(onOpenLibrary = { innerNav.navigate("library") })
             }
-            composable(HomeTab.Fields.route) { FieldsScreen() }
-            composable(HomeTab.Insights.route) { InsightsScreen() }
+            composable(HomeTab.Fields.route) {
+                FieldsScreen()
+            }
+            composable(HomeTab.Insights.route) {
+                InsightsScreen()
+            }
             composable(HomeTab.Profile.route) {
                 ProfileScreen(
                     onSignOut = {
@@ -116,7 +120,7 @@ private fun ScanScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val lib = defaultLibRepo()
-    val scope = rememberCoroutineScope() // ← use Compose coroutine scope
+    val scope = rememberCoroutineScope()
 
     val controller = remember {
         LifecycleCameraController(context).apply {
@@ -128,8 +132,7 @@ private fun ScanScreen(
     // Camera / legacy write permissions
     var hasCamPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-                    == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         )
     }
     val camPermLauncher = rememberLauncherForActivityResult(
@@ -140,7 +143,8 @@ private fun ScanScreen(
         mutableStateOf(
             Build.VERSION.SDK_INT >= 29 ||
                     ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        context,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
                     ) == PackageManager.PERMISSION_GRANTED
         )
     }
@@ -167,13 +171,14 @@ private fun ScanScreen(
         if (uri != null) {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
             lastPhotoUri = uri
-            // Save to library using Compose scope
+            // Save to library (string URI, per new repo)
             scope.launch {
-                lib.addCapture(uri)
+                lib.addCapture(uri.toString())
                 toast(context, "Imported from gallery")
             }
         }
@@ -201,24 +206,26 @@ private fun ScanScreen(
     }
 
     fun capture() {
-        if (!hasCamPermission) { toast(context, "Camera permission required"); return }
+        if (!hasCamPermission) {
+            toast(context, "Camera permission required"); return
+        }
         if (Build.VERSION.SDK_INT < 29 && !hasLegacyWrite) {
             toast(context, "Storage permission required"); return
         }
         val opts = outputOptionsForGallery()
         controller.takePicture(
-            opts,
-            mainExecutor,
+            opts, mainExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     output.savedUri?.let { uri ->
                         lastPhotoUri = uri
                         scope.launch {
-                            lib.addCapture(uri) // ← call suspend from coroutine
+                            lib.addCapture(uri.toString()) // ← repo expects String
                             toast(context, "Saved to Photos & Library")
                         }
                     } ?: toast(context, "Saved (no Uri)")
                 }
+
                 override fun onError(ex: ImageCaptureException) {
                     toast(context, "Capture failed: ${ex.message ?: ex.imageCaptureError}")
                 }
@@ -256,13 +263,10 @@ private fun ScanScreen(
                     controller.cameraSelector =
                         if (controller.cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA)
                             CameraSelector.DEFAULT_FRONT_CAMERA
-                        else
-                            CameraSelector.DEFAULT_BACK_CAMERA
+                        else CameraSelector.DEFAULT_BACK_CAMERA
                 }
             ) { Text("Flip") }
-
             Spacer(Modifier.width(8.dp))
-
             FilledTonalButton(
                 onClick = {
                     torchOn = !torchOn

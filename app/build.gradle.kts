@@ -127,4 +127,12 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // Core runtime (includes native .so)
+    implementation("org.tensorflow:tensorflow-lite:2.12.0")
+    // Only add this if your model needs Flex ops (Select TF Ops)
+    implementation("org.tensorflow:tensorflow-lite-select-tf-ops:2.12.0")
+
+    // Optional helpers (audio/image/tensor ops utils)
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
 }

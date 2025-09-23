@@ -13,7 +13,7 @@ import com.example.agriscan.ui.defaultFieldRepo
 @Composable
 fun InsightsScreen() {
     val fieldsRepo = defaultFieldRepo()
-    val fields by fieldsRepo.fields.collectAsState(initial = emptyList())
+    val fields by fieldsRepo.observeFields().collectAsState(initial = emptyList())
 
     Surface(Modifier.fillMaxSize()) {
         Column(
@@ -25,17 +25,14 @@ fun InsightsScreen() {
         ) {
             Text("Insights", style = MaterialTheme.typography.headlineSmall)
             StatRow(label = "Fields", value = fields.size.toString())
-            // You can add more (captures, scans, etc.) later
+            // Add more later (captures, scans, etc.)
         }
     }
 }
 
 @Composable
 private fun StatRow(label: String, value: String) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, style = MaterialTheme.typography.titleMedium)
         Text(value, style = MaterialTheme.typography.titleMedium)
     }

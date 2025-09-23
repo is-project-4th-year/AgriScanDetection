@@ -6,19 +6,25 @@ import kotlinx.coroutines.flow.Flow
 
 class FieldRepository(private val dao: FieldDao) {
 
-    // Stream of fields from Room
-    val fields: Flow<List<FieldEntity>> = dao.observeFields()
+    fun observeFields(): Flow<List<FieldEntity>> = dao.observeFields()
 
-    // Create
-    suspend fun addField(name: String, notes: String): Long =
-        dao.insert(FieldEntity(name = name, notes = notes))
+    fun observeField(id: Long): Flow<FieldEntity?> = dao.observeField(id)
 
-    // Overload if you already built the entity elsewhere
-    suspend fun addField(entity: FieldEntity): Long = dao.insert(entity)
+    suspend fun create(name: String, notes: String = ""): Long =
+        dao.insert(FieldEntity(name = name.trim(), notes = notes))
 
-    // Update
-    suspend fun updateField(entity: FieldEntity) = dao.update(entity)
+    suspend fun rename(id: Long, newName: String) {
+        val current = dao.find(id) ?: return
+        dao.update(current.copy(name = newName.trim()))
+    }
 
-    // Delete by id
-    suspend fun deleteField(id: Long) = dao.delete(id)
+    suspend fun updateNotes(id: Long, notes: String) {
+        val current = dao.find(id) ?: return
+        dao.update(current.copy(notes = notes))
+    }
+
+    suspend fun delete(id: Long) {
+        dao.delete(id)
+        // Captures keep living with fieldId = null due to FK SET_NULL
+    }
 }

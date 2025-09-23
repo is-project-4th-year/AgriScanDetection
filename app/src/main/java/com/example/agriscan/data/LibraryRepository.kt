@@ -1,24 +1,22 @@
 package com.example.agriscan.data
 
-import android.net.Uri
 import com.example.agriscan.data.local.CaptureDao
 import com.example.agriscan.data.local.CaptureEntity
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 
 class LibraryRepository(private val dao: CaptureDao) {
 
-    /** Library items as URIs (newest first). */
-    val captures: Flow<List<Uri>> =
-        dao.observeCaptures().map { list ->
-            list.mapNotNull { runCatching { Uri.parse(it.uri) }.getOrNull() }
-        }
+    fun observeAll(): Flow<List<CaptureEntity>> = dao.observeCaptures()
 
-    suspend fun addCapture(uri: Uri) {
-        dao.insert(CaptureEntity(uri = uri.toString()))
-    }
+    fun observeByField(fieldId: Long): Flow<List<CaptureEntity>> = dao.observeByField(fieldId)
 
-    suspend fun removeCapture(uri: Uri) {
-        dao.deleteByUri(uri.toString())
-    }
+    suspend fun addCapture(uriString: String, fieldId: Long? = null): Long =
+        dao.insert(CaptureEntity(uri = uriString, fieldId = fieldId))
+
+    suspend fun assignToField(captureIds: List<Long>, fieldId: Long?) =
+        dao.assignToField(captureIds, fieldId)
+
+    suspend fun remove(captureId: Long) = dao.delete(captureId)
+
+    suspend fun removeMany(captureIds: List<Long>) = dao.deleteMany(captureIds)
 }

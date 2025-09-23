@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.agriscan.data.local.CaptureEntity
 import com.example.agriscan.ui.defaultLibRepo
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -52,27 +53,27 @@ fun LibraryScreen(
     val repo = defaultLibRepo()
     val scope = rememberCoroutineScope()
 
-    val items by repo.captures.collectAsState(initial = emptyList())
+    val items by repo.observeAll().collectAsState(initial = emptyList())
     var preview: Uri? by remember { mutableStateOf(null) }
 
-    // selection (use list for broad Compose compatibility)
-    val selected: SnapshotStateList<Uri> = remember { mutableStateListOf() }
+    // selection by captureId for correct deletes
+    val selected: SnapshotStateList<Long> = remember { mutableStateListOf() }
     val selectionMode = selected.isNotEmpty()
 
     fun shareSelected() {
-        val list = selected.toList()
-        if (list.isEmpty()) return
-        if (list.size == 1) {
+        val toShareUris = items.filter { it.id in selected }.map { Uri.parse(it.uri) }
+        if (toShareUris.isEmpty()) return
+        if (toShareUris.size == 1) {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "image/*"
-                putExtra(Intent.EXTRA_STREAM, list.first())
+                putExtra(Intent.EXTRA_STREAM, toShareUris.first())
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             ctx.startActivity(Intent.createChooser(intent, "Share image"))
         } else {
             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "image/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(list))
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(toShareUris))
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             ctx.startActivity(Intent.createChooser(intent, "Share images"))
@@ -80,10 +81,10 @@ fun LibraryScreen(
     }
 
     fun deleteSelected() {
-        val list = selected.toList()
-        if (list.isEmpty()) return
+        val ids = selected.toList()
+        if (ids.isEmpty()) return
         scope.launch {
-            list.forEach { repo.removeCapture(it) }
+            repo.removeMany(ids)
             selected.clear()
         }
     }
@@ -91,13 +92,9 @@ fun LibraryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text(if (selectionMode) "${selected.size} selected" else "Library (${items.size})")
-                },
+                title = { Text(if (selectionMode) "${selected.size} selected" else "Library (${items.size})") },
                 navigationIcon = {
-                    IconButton(onClick = {
-                        if (selectionMode) selected.clear() else onBack()
-                    }) {
+                    IconButton(onClick = { if (selectionMode) selected.clear() else onBack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -105,10 +102,9 @@ fun LibraryScreen(
                     if (selectionMode) {
                         TextButton(onClick = {
                             if (selected.size < items.size) {
-                                selected.clear(); selected.addAll(items)
+                                selected.clear(); selected.addAll(items.map { it.id })
                             } else selected.clear()
                         }) { Text(if (selected.size < items.size) "Select all" else "Clear") }
-
                         IconButton(onClick = { shareSelected() }) {
                             Icon(Icons.Filled.Share, contentDescription = "Share selected")
                         }
@@ -147,32 +143,35 @@ fun LibraryScreen(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(items, key = { it.toString() }) { uri ->
+                items(items, key = { it.id }) { cap: CaptureEntity ->
                     val ctxLocal = LocalContext.current
-                    val meta = remember(uri) { loadMeta(ctxLocal, uri) } // regular fn, safe in remember
+                    val imgUri = remember(cap.uri) { Uri.parse(cap.uri) }
+                    val meta = remember(cap.uri) { loadMeta(ctxLocal, imgUri) }
+
                     LibraryCard(
-                        uri = uri,
+                        capture = cap,
+                        imageUri = imgUri,
                         meta = meta,
-                        selected = selected.contains(uri),
+                        selected = selected.contains(cap.id),
                         selectionMode = selectionMode,
                         onToggleSelect = {
-                            if (selected.contains(uri)) selected.remove(uri) else selected.add(uri)
+                            if (selected.contains(cap.id)) selected.remove(cap.id) else selected.add(cap.id)
                         },
                         onOpen = {
                             if (selectionMode) {
-                                if (selected.contains(uri)) selected.remove(uri) else selected.add(uri)
+                                if (selected.contains(cap.id)) selected.remove(cap.id) else selected.add(cap.id)
                             } else {
-                                preview = uri
+                                preview = imgUri
                             }
                         },
                         onShare = {
                             if (selectionMode) {
-                                if (!selected.contains(uri)) selected.add(uri)
+                                if (!selected.contains(cap.id)) selected.add(cap.id)
                                 shareSelected()
                             } else {
                                 val intent = Intent(Intent.ACTION_SEND).apply {
                                     type = "image/*"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    putExtra(Intent.EXTRA_STREAM, imgUri)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 }
                                 ctx.startActivity(Intent.createChooser(intent, "Share image"))
@@ -180,10 +179,10 @@ fun LibraryScreen(
                         },
                         onDelete = {
                             if (selectionMode) {
-                                if (!selected.contains(uri)) selected.add(uri)
+                                if (!selected.contains(cap.id)) selected.add(cap.id)
                                 deleteSelected()
                             } else {
-                                scope.launch { repo.removeCapture(uri) }
+                                scope.launch { repo.remove(cap.id) }
                             }
                         }
                     )
@@ -214,7 +213,8 @@ fun LibraryScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryCard(
-    uri: Uri,
+    capture: CaptureEntity,
+    imageUri: Uri,
     meta: MediaMeta?,
     selected: Boolean,
     selectionMode: Boolean,
@@ -236,7 +236,7 @@ private fun LibraryCard(
     ) {
         Box(Modifier.fillMaxSize()) {
             AsyncImage(
-                model = uri,
+                model = imageUri,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -277,7 +277,7 @@ private fun LibraryCard(
                     ) {
                         Column {
                             Text(
-                                text = meta?.name ?: (uri.lastPathSegment ?: "image"),
+                                text = meta?.name ?: (imageUri.lastPathSegment ?: "image"),
                                 style = MaterialTheme.typography.labelLarge,
                                 color = Color.White,
                                 maxLines = 1
@@ -289,10 +289,8 @@ private fun LibraryCard(
                                     append(formatDate(meta.dateMillis))
                                 }
                             }
-                            if (sub.isNotEmpty())
-                                Text(sub, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = Color.White)
                         }
-
                         Row {
                             FilledTonalIconButton(
                                 onClick = onShare,
@@ -335,8 +333,10 @@ private fun loadMeta(ctx: android.content.Context, uri: Uri): MediaMeta {
             val iSize = it.getColumnIndex(OpenableColumns.SIZE)
             val iMod  = it.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
             val iAdd  = it.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+
             if (iName >= 0 && !it.isNull(iName)) name = it.getString(iName)
             if (iSize >= 0 && !it.isNull(iSize)) size = it.getLong(iSize)
+
             date = when {
                 iMod >= 0 && !it.isNull(iMod) -> it.getLong(iMod) * 1000L
                 iAdd >= 0 && !it.isNull(iAdd) -> it.getLong(iAdd) * 1000L

@@ -3,52 +3,42 @@ package com.example.agriscan.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.example.agriscan.data.local.FieldEntity
 import com.example.agriscan.ui.defaultFieldRepo
 import kotlinx.coroutines.launch
 
 @Composable
-fun FieldsScreen() {
+fun FieldsScreen(
+    onOpenDetails: (Long) -> Unit = {} // keeps your TODO optional & compile-safe
+) {
     val repo = defaultFieldRepo()
     val scope = rememberCoroutineScope()
 
     // Collect the Room flow
-    val fields by repo.fields.collectAsState(initial = emptyList())
+    val fields by repo.observeFields().collectAsState(initial = emptyList())
 
     // Add-field inputs
-    var name = remember { mutableStateOf("") }
-    var notes = remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
 
     fun addField() {
-        val n = name.value.trim()
+        val n = name.trim()
         if (n.isEmpty()) return
         scope.launch {
-            repo.addField(name = n, notes = notes.value.trim())
-            name.value = ""
-            notes.value = ""
+            repo.create(name = n, notes = notes.trim())
+            name = ""
+            notes = ""
         }
     }
 
     fun deleteField(id: Long) {
-        scope.launch { repo.deleteField(id) }
+        scope.launch { repo.delete(id) }
     }
 
     Column(
@@ -61,27 +51,27 @@ fun FieldsScreen() {
 
         // Add field form
         OutlinedTextField(
-            value = name.value,
-            onValueChange = { name.value = it },
+            value = name,
+            onValueChange = { name = it },
             label = { Text("Field name") },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(
-            value = notes.value,
-            onValueChange = { notes.value = it },
+            value = notes,
+            onValueChange = { notes = it },
             label = { Text("Notes (optional)") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
             modifier = Modifier.fillMaxWidth()
         )
         Button(
             onClick = { addField() },
-            enabled = name.value.trim().isNotEmpty(),
+            enabled = name.trim().isNotEmpty(),
             modifier = Modifier.align(Alignment.End)
-        ) { Text("Add Field") }
+        ) {
+            Text("Add Field")
+        }
 
-        HorizontalDivider()
+        Divider()
 
         if (fields.isEmpty()) {
             Text(
@@ -93,11 +83,17 @@ fun FieldsScreen() {
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // ✅ Use the List<T> overload of items(...)
                 items(fields, key = { it.id }) { field: FieldEntity ->
                     FieldRow(
                         field = field,
-                        onDelete = { deleteField(field.id) }
+                        onDelete = { deleteField(field.id) },
+                        onRename = { newName ->
+                            scope.launch { repo.rename(field.id, newName) }
+                        },
+                        onEditNotes = { newNotes ->
+                            scope.launch { repo.updateNotes(field.id, newNotes) }
+                        },
+                        onOpen = { onOpenDetails(field.id) }
                     )
                 }
             }
@@ -108,8 +104,17 @@ fun FieldsScreen() {
 @Composable
 private fun FieldRow(
     field: FieldEntity,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRename: (String) -> Unit,
+    onEditNotes: (String) -> Unit,
+    onOpen: () -> Unit
 ) {
+    var showRename by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf(TextFieldValue(field.name)) }
+
+    var showEditNotes by remember { mutableStateOf(false) }
+    var notesText by remember { mutableStateOf(TextFieldValue(field.notes)) }
+
     ElevatedCard {
         Column(Modifier.padding(12.dp)) {
             Text(field.name, style = MaterialTheme.typography.titleMedium)
@@ -120,8 +125,64 @@ private fun FieldRow(
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onDelete) { Text("Delete") }
-                TextButton(onClick = { /* TODO: details/edit later */ }) { Text("Details") }
+                TextButton(onClick = { showRename = true }) { Text("Rename") }
+                TextButton(onClick = { showEditNotes = true }) { Text("Edit notes") }
+                TextButton(onClick = onOpen) { Text("Details") }
             }
         }
+    }
+
+    if (showRename) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            title = { Text("Rename field") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Field name") }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = renameText.text.trim()
+                        if (trimmed.isNotEmpty()) onRename(trimmed)
+                        showRename = false
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRename = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showEditNotes) {
+        AlertDialog(
+            onDismissRequest = { showEditNotes = false },
+            title = { Text("Edit notes") },
+            text = {
+                OutlinedTextField(
+                    value = notesText,
+                    onValueChange = { notesText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Notes…") }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onEditNotes(notesText.text)
+                        showEditNotes = false
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditNotes = false }) { Text("Cancel") }
+            }
+        )
     }
 }
