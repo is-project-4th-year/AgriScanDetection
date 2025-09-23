@@ -5,7 +5,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [FieldEntity::class, CaptureEntity::class],
-    version = 1,
+    version = 3,               // ⬅️ bump
     exportSchema = true
 )
 abstract class AgriDb : RoomDatabase() {

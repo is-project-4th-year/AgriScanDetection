@@ -25,6 +25,6 @@ class FieldRepository(private val dao: FieldDao) {
 
     suspend fun delete(id: Long) {
         dao.delete(id)
-        // Captures keep living with fieldId = null due to FK SET_NULL
+        // Captures retain but their fieldId will be set to NULL by FK if you add such logic later.
     }
 }

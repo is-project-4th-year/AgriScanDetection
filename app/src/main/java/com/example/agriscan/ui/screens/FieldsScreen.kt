@@ -1,5 +1,6 @@
 package com.example.agriscan.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -115,7 +116,11 @@ private fun FieldRow(
     var showEditNotes by remember { mutableStateOf(false) }
     var notesText by remember { mutableStateOf(TextFieldValue(field.notes)) }
 
-    ElevatedCard {
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpen() } // ← tap-through on the whole row
+    ) {
         Column(Modifier.padding(12.dp)) {
             Text(field.name, style = MaterialTheme.typography.titleMedium)
             if (field.notes.isNotEmpty()) {
@@ -127,6 +132,7 @@ private fun FieldRow(
                 TextButton(onClick = onDelete) { Text("Delete") }
                 TextButton(onClick = { showRename = true }) { Text("Rename") }
                 TextButton(onClick = { showEditNotes = true }) { Text("Edit notes") }
+                // Keep an explicit button too, if you like
                 TextButton(onClick = onOpen) { Text("Details") }
             }
         }

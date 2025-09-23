@@ -1,7 +1,6 @@
 package com.example.agriscan.ui.screens
 
 import android.net.Uri
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -24,7 +23,7 @@ import com.example.agriscan.ui.defaultFieldRepo
 import com.example.agriscan.ui.defaultLibRepo
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FieldDetailScreen(
     fieldId: Long,
@@ -61,7 +60,7 @@ fun FieldDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showRename = true }) {
+                    IconButton(onClick = { showRename = true }, enabled = field != null) {
                         Icon(Icons.Filled.Edit, contentDescription = "Rename")
                     }
                 }
@@ -80,7 +79,7 @@ fun FieldDetailScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Notes
+            // Notes card
             Card(
                 Modifier
                     .padding(horizontal = 16.dp, vertical = 12.dp)
@@ -127,7 +126,10 @@ fun FieldDetailScreen(
 
             if (captures.isEmpty()) {
                 Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    Text("No photos assigned yet.\nCapture from Scan or assign from Library.", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Text(
+                        "No photos assigned yet.\nCapture from Scan or assign from Library.",
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
                 }
             } else {
                 LazyVerticalGrid(

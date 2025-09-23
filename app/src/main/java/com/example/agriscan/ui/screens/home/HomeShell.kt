@@ -19,26 +19,64 @@ import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import coil.compose.AsyncImage
 import com.example.agriscan.ui.AuthViewModel
+import com.example.agriscan.ui.defaultFieldRepo
 import com.example.agriscan.ui.defaultLibRepo
+import com.example.agriscan.ui.screens.FieldDetailScreen
 import com.example.agriscan.ui.screens.FieldsScreen
 import com.example.agriscan.ui.screens.InsightsScreen
 import com.example.agriscan.ui.screens.LibraryScreen
@@ -92,7 +130,8 @@ fun HomeShell(
                 ScanScreen(onOpenLibrary = { innerNav.navigate("library") })
             }
             composable(HomeTab.Fields.route) {
-                FieldsScreen()
+                // Wire the detail screen navigation
+                FieldsScreen(onOpenDetails = { id -> innerNav.navigate("field/$id") })
             }
             composable(HomeTab.Insights.route) {
                 InsightsScreen()
@@ -105,9 +144,19 @@ fun HomeShell(
                     }
                 )
             }
-            // Library route
             composable("library") {
                 LibraryScreen(onBack = { innerNav.popBackStack() })
+            }
+            // Field Detail route
+            composable(
+                route = "field/{fieldId}",
+                arguments = listOf(navArgument("fieldId") { type = NavType.LongType })
+            ) { backStack ->
+                val fieldId = backStack.arguments?.getLong("fieldId") ?: 0L
+                FieldDetailScreen(
+                    fieldId = fieldId,
+                    onBack = { innerNav.popBackStack() }
+                )
             }
         }
     }
@@ -120,6 +169,7 @@ private fun ScanScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val lib = defaultLibRepo()
+    val fieldsRepo = defaultFieldRepo()
     val scope = rememberCoroutineScope()
 
     val controller = remember {
@@ -128,6 +178,11 @@ private fun ScanScreen(
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
         }
     }
+
+    // Observed fields for assignment
+    val fields by fieldsRepo.observeFields().collectAsState(initial = emptyList())
+    var selectedFieldId by remember { mutableStateOf<Long?>(null) }
+    var selectedFieldName by remember { mutableStateOf("None") }
 
     // Camera / legacy write permissions
     var hasCamPermission by remember {
@@ -176,10 +231,12 @@ private fun ScanScreen(
                 )
             }
             lastPhotoUri = uri
-            // Save to library (string URI, per new repo)
             scope.launch {
-                lib.addCapture(uri.toString())
-                toast(context, "Imported from gallery")
+                lib.addCapture(uri.toString(), fieldId = selectedFieldId)
+                toast(
+                    context,
+                    "Imported to Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
+                )
             }
         }
     }
@@ -206,9 +263,7 @@ private fun ScanScreen(
     }
 
     fun capture() {
-        if (!hasCamPermission) {
-            toast(context, "Camera permission required"); return
-        }
+        if (!hasCamPermission) { toast(context, "Camera permission required"); return }
         if (Build.VERSION.SDK_INT < 29 && !hasLegacyWrite) {
             toast(context, "Storage permission required"); return
         }
@@ -220,12 +275,14 @@ private fun ScanScreen(
                     output.savedUri?.let { uri ->
                         lastPhotoUri = uri
                         scope.launch {
-                            lib.addCapture(uri.toString()) // ← repo expects String
-                            toast(context, "Saved to Photos & Library")
+                            lib.addCapture(uri.toString(), fieldId = selectedFieldId)
+                            toast(
+                                context,
+                                "Saved to Photos & Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
+                            )
                         }
                     } ?: toast(context, "Saved (no Uri)")
                 }
-
                 override fun onError(ex: ImageCaptureException) {
                     toast(context, "Capture failed: ${ex.message ?: ex.imageCaptureError}")
                 }
@@ -251,28 +308,44 @@ private fun ScanScreen(
             }
         }
 
-        // Top-right controls: Flip / Torch
+        // Top row: Field selector • Flip • Torch
         Row(
             Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            FilledTonalButton(
-                onClick = {
-                    controller.cameraSelector =
-                        if (controller.cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA)
-                            CameraSelector.DEFAULT_FRONT_CAMERA
-                        else CameraSelector.DEFAULT_BACK_CAMERA
-                }
-            ) { Text("Flip") }
-            Spacer(Modifier.width(8.dp))
-            FilledTonalButton(
-                onClick = {
-                    torchOn = !torchOn
-                    runCatching { controller.enableTorch(torchOn) }
-                }
-            ) { Text(if (torchOn) "Torch • On" else "Torch • Off") }
+            // Assign-to-field selector
+            FieldPicker(
+                fields = fields.map { it.id to it.name },
+                selectedId = selectedFieldId,
+                onSelect = { id, name ->
+                    selectedFieldId = id
+                    selectedFieldName = name ?: "None"
+                },
+                modifier = Modifier.weight(1f)
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(
+                    onClick = {
+                        controller.cameraSelector =
+                            if (controller.cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA)
+                                CameraSelector.DEFAULT_FRONT_CAMERA
+                            else CameraSelector.DEFAULT_BACK_CAMERA
+                    }
+                ) { Text("Flip") }
+                Spacer(Modifier.width(8.dp))
+                FilledTonalButton(
+                    onClick = {
+                        torchOn = !torchOn
+                        runCatching { controller.enableTorch(torchOn) }
+                    }
+                ) { Text(if (torchOn) "Torch • On" else "Torch • Off") }
+            }
         }
 
         // Bottom bar: thumbnail • capture • upload • library
@@ -287,7 +360,7 @@ private fun ScanScreen(
             if (lastPhotoUri != null) {
                 AsyncImage(
                     model = lastPhotoUri,
-                    contentDescription = "Last",
+                    contentDescription = "Last captured image",
                     modifier = Modifier
                         .size(56.dp)
                         .clip(RoundedCornerShape(12.dp))
@@ -332,6 +405,67 @@ private fun ScanScreen(
                     )
                 }
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FieldPicker(
+    fields: List<Pair<Long, String>>,
+    selectedId: Long?,
+    onSelect: (Long?, String?) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var label by remember { mutableStateOf("Assign to: None") }
+
+    LaunchedEffect(selectedId, fields) {
+        val name = fields.firstOrNull { it.first == selectedId }?.second
+        label = "Assign to: " + (name ?: "None")
+    }
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = TextFieldValue(label),
+                onValueChange = { /* read-only */ },
+                readOnly = true,
+                label = { Text("Field") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("None") },
+                    onClick = {
+                        onSelect(null, null)
+                        expanded = false
+                    }
+                )
+                fields.forEach { (id, name) ->
+                    DropdownMenuItem(
+                        text = { Text(name) },
+                        onClick = {
+                            onSelect(id, name)
+                            expanded = false
+                        }
+                    )
+                }
+            }
         }
     }
 }
