@@ -25,11 +25,10 @@ class TFLiteClassifier private constructor(
 ) {
 
     companion object {
-        private const val MODEL_PATH = "model_float32.tflite"
+        private const val MODEL_PATH = "model_float32.tflite" // your float32 model
         private const val LABELS_PATH = "labels.txt"
         private const val NUM_THREADS = 4
 
-        /** Single, lazily-initialized instance */
         @Volatile
         private var instance: TFLiteClassifier? = null
 
@@ -39,15 +38,11 @@ class TFLiteClassifier private constructor(
             }
         }
 
-        /** Close the interpreter and clear the singleton (e.g., on app going to background). */
+        /** Optional: call when leaving Scan screen to free native resources. */
         fun shutdown() {
             synchronized(this) {
-                try {
-                    instance?.close()
-                } catch (_: Throwable) {
-                } finally {
-                    instance = null
-                }
+                try { instance?.close() } catch (_: Throwable) {}
+                instance = null
             }
         }
 
@@ -55,10 +50,7 @@ class TFLiteClassifier private constructor(
             val model = loadModelFile(ctx, MODEL_PATH)
             val options = Interpreter.Options().apply {
                 setNumThreads(NUM_THREADS)
-                // Optional: enable XNNPACK for float models (usually on by default)
-                setUseXNNPACK(true)
-                // Optional (only if you’ve added GPU delegate dep):
-                // addDelegate(org.tensorflow.lite.gpu.GpuDelegate())
+                setUseXNNPACK(true) // good for float32 models
             }
             val interpreter = Interpreter(model, options)
             val labels = loadLabels(ctx, LABELS_PATH)
@@ -87,31 +79,30 @@ class TFLiteClassifier private constructor(
         }
     }
 
-    /** Close TFLite interpreter resources */
     fun close() {
-        try {
-            interpreter.close()
-        } catch (_: Throwable) {
-        }
+        try { interpreter.close() } catch (_: Throwable) {}
     }
 
     /**
-     * Run prediction on a Bitmap.
-     * RGB → resize 192×192 → float32 [0,1] → NHWC → logits → softmax
-     * Synchronized to avoid concurrent access to the same Interpreter.
+     * Predict on a Bitmap.
+     * Pipeline: RGB → resize 192×192 → float32 [0,1] → NHWC → logits → softmax
      */
     @Synchronized
     fun predict(bitmap: Bitmap, topK: Int = 3): List<Prediction> {
         val inputBuffer = bitmapToNHWCFloatBuffer(bitmap, inputSize, inputSize)
-        val numClasses = labels.size.coerceAtLeast(1)
-        val output = Array(1) { FloatArray(numClasses) }
 
+        // ⚠️ Size output from the model, not from labels, to avoid mismatch crashes.
+        val outShape = interpreter.getOutputTensor(0).shape() // e.g. [1, 15] or [15]
+        val numClasses = if (outShape.isNotEmpty()) outShape.last() else labels.size.coerceAtLeast(1)
+
+        val output = Array(1) { FloatArray(numClasses) }
         interpreter.run(inputBuffer, output)
+
         val probs = softmax(output[0])
 
         return probs
             .mapIndexed { idx, p ->
-                val name = if (idx < labels.size) labels[idx] else "class_$idx"
+                val name = if (idx in labels.indices) labels[idx] else "class_$idx"
                 Prediction(name, p)
             }
             .sortedByDescending { it.prob }
@@ -136,6 +127,7 @@ class TFLiteClassifier private constructor(
             order(ByteOrder.nativeOrder())
         }
 
+        // RGB in [0,1], NHWC order
         for (y in 0 until dstH) {
             for (x in 0 until dstW) {
                 val c = resized.getPixel(x, y)
@@ -177,11 +169,10 @@ class TFLiteClassifier private constructor(
 
         val (w, h) = optsBounds.outWidth to optsBounds.outHeight
         if (w <= 0 || h <= 0) {
-            // Fallback single-pass decode
             return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
         }
 
-        // 2) Compute inSampleSize
+        // 2) Compute inSampleSize (power-of-two downscale to <= maxDim)
         var sample = 1
         var tw = w
         var th = h

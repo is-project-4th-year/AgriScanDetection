@@ -1,5 +1,6 @@
 package com.example.agriscan.ui.screens
 
+import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
@@ -15,6 +16,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
@@ -31,6 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.agriscan.data.local.CaptureEntity
+import com.example.agriscan.ui.defaultFieldRepo
 import com.example.agriscan.ui.defaultLibRepo
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -44,21 +47,31 @@ private data class MediaMeta(
     val dateMillis: Long?
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
-    val repo = defaultLibRepo()
+    val libRepo = defaultLibRepo()
+    val fieldRepo = defaultFieldRepo()
     val scope = rememberCoroutineScope()
 
-    val items by repo.observeAll().collectAsState(initial = emptyList())
+    val items by libRepo.observeAll().collectAsState(initial = emptyList())
+
+    // fields for assignment
+    val fields by fieldRepo.observeFields().collectAsState(initial = emptyList())
+    val fieldNameById = remember(fields) { fields.associate { it.id to it.name } }
+
     var preview: Uri? by remember { mutableStateOf(null) }
 
-    // selection by captureId for correct deletes
+    // selection by captureId for correct deletes / assigns
     val selected: SnapshotStateList<Long> = remember { mutableStateListOf() }
     val selectionMode = selected.isNotEmpty()
+
+    // assign dialog
+    var showAssignDialog by remember { mutableStateOf(false) }
+    var assignChoice: Long? by remember { mutableStateOf(null) } // null = None
 
     fun shareSelected() {
         val toShareUris = items.filter { it.id in selected }.map { Uri.parse(it.uri) }
@@ -84,7 +97,18 @@ fun LibraryScreen(
         val ids = selected.toList()
         if (ids.isEmpty()) return
         scope.launch {
-            repo.removeMany(ids)
+            libRepo.removeMany(ids)
+            selected.clear()
+        }
+    }
+
+    fun assignSelected(toFieldId: Long?) {
+        val ids = selected.toList()
+        if (ids.isEmpty()) return
+        scope.launch {
+            libRepo.assignToField(ids, toFieldId)
+            val label = toFieldId?.let { "assigned to “${fieldNameById[it] ?: "Field"}”" } ?: "unassigned"
+            toast(ctx, "Updated ${ids.size} photo(s) • $label")
             selected.clear()
         }
     }
@@ -100,14 +124,24 @@ fun LibraryScreen(
                 },
                 actions = {
                     if (selectionMode) {
+                        // Assign to Field
+                        IconButton(onClick = {
+                            assignChoice = null // default to None
+                            showAssignDialog = true
+                        }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Assign to field")
+                        }
+                        // Select All / Clear
                         TextButton(onClick = {
                             if (selected.size < items.size) {
                                 selected.clear(); selected.addAll(items.map { it.id })
                             } else selected.clear()
                         }) { Text(if (selected.size < items.size) "Select all" else "Clear") }
+                        // Share
                         IconButton(onClick = { shareSelected() }) {
                             Icon(Icons.Filled.Share, contentDescription = "Share selected")
                         }
+                        // Delete
                         IconButton(onClick = { deleteSelected() }) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
                         }
@@ -147,11 +181,13 @@ fun LibraryScreen(
                     val ctxLocal = LocalContext.current
                     val imgUri = remember(cap.uri) { Uri.parse(cap.uri) }
                     val meta = remember(cap.uri) { loadMeta(ctxLocal, imgUri) }
+                    val assignedName = cap.fieldId?.let { fieldNameById[it] }
 
                     LibraryCard(
                         capture = cap,
                         imageUri = imgUri,
                         meta = meta,
+                        assignedName = assignedName,
                         selected = selected.contains(cap.id),
                         selectionMode = selectionMode,
                         onToggleSelect = {
@@ -161,6 +197,7 @@ fun LibraryScreen(
                             if (selectionMode) {
                                 if (selected.contains(cap.id)) selected.remove(cap.id) else selected.add(cap.id)
                             } else {
+                                // preview
                                 preview = imgUri
                             }
                         },
@@ -182,7 +219,7 @@ fun LibraryScreen(
                                 if (!selected.contains(cap.id)) selected.add(cap.id)
                                 deleteSelected()
                             } else {
-                                scope.launch { repo.remove(cap.id) }
+                                scope.launch { libRepo.remove(cap.id) }
                             }
                         }
                     )
@@ -208,6 +245,65 @@ fun LibraryScreen(
             }
         )
     }
+
+    if (showAssignDialog) {
+        AlertDialog(
+            onDismissRequest = { showAssignDialog = false },
+            title = { Text("Assign selected to…") },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    // None option
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .combinedClickable(
+                                onClick = { assignChoice = null },
+                                onLongClick = { assignChoice = null }
+                            )
+                    ) {
+                        RadioButton(selected = assignChoice == null, onClick = { assignChoice = null })
+                        Spacer(Modifier.width(8.dp))
+                        Text("None (unassign)")
+                    }
+                    Divider()
+                    fields.forEach { f ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp)
+                                .combinedClickable(
+                                    onClick = { assignChoice = f.id },
+                                    onLongClick = { assignChoice = f.id }
+                                )
+                        ) {
+                            RadioButton(selected = assignChoice == f.id, onClick = { assignChoice = f.id })
+                            Spacer(Modifier.width(8.dp))
+                            Text(f.name)
+                        }
+                    }
+                    if (fields.isEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("No fields yet. Create one in the Fields tab.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        assignSelected(assignChoice)
+                        showAssignDialog = false
+                    },
+                    enabled = selected.isNotEmpty()
+                ) { Text("Assign") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAssignDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -216,6 +312,7 @@ private fun LibraryCard(
     capture: CaptureEntity,
     imageUri: Uri,
     meta: MediaMeta?,
+    assignedName: String?,
     selected: Boolean,
     selectionMode: Boolean,
     onToggleSelect: () -> Unit,
@@ -275,7 +372,7 @@ private fun LibraryCard(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text(
                                 text = meta?.name ?: (imageUri.lastPathSegment ?: "image"),
                                 style = MaterialTheme.typography.labelLarge,
@@ -288,8 +385,10 @@ private fun LibraryCard(
                                     if (isNotEmpty()) append(" • ")
                                     append(formatDate(meta.dateMillis))
                                 }
+                                if (isNotEmpty()) append(" • ")
+                                append(assignedName ?: "Unassigned")
                             }
-                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                            Text(sub, style = MaterialTheme.typography.labelSmall, color = Color.White, maxLines = 1)
                         }
                         Row {
                             FilledTonalIconButton(
@@ -364,3 +463,6 @@ private fun formatBytes(bytes: Long): String {
 
 private fun formatDate(millis: Long): String =
     DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(millis))
+
+private fun toast(ctx: Context, msg: String) =
+    android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show()

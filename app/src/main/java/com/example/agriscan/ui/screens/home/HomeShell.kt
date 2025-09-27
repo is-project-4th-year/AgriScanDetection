@@ -19,44 +19,11 @@ import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,6 +40,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import coil.compose.AsyncImage
+import com.example.agriscan.ml.Prediction
+import com.example.agriscan.ml.TFLiteClassifier
 import com.example.agriscan.ui.AuthViewModel
 import com.example.agriscan.ui.defaultFieldRepo
 import com.example.agriscan.ui.defaultLibRepo
@@ -84,6 +53,7 @@ import com.google.firebase.auth.ktx.auth
 import com.google.firebase.ktx.Firebase
 import kotlinx.coroutines.launch
 import java.io.File
+import com.example.agriscan.core.runAnalysis
 
 private sealed class HomeTab(val route: String, val label: String) {
     data object Scan     : HomeTab("scan", "Scan")
@@ -130,7 +100,6 @@ fun HomeShell(
                 ScanScreen(onOpenLibrary = { innerNav.navigate("library") })
             }
             composable(HomeTab.Fields.route) {
-                // Wire the detail screen navigation
                 FieldsScreen(onOpenDetails = { id -> innerNav.navigate("field/$id") })
             }
             composable(HomeTab.Insights.route) {
@@ -147,7 +116,6 @@ fun HomeShell(
             composable("library") {
                 LibraryScreen(onBack = { innerNav.popBackStack() })
             }
-            // Field Detail route
             composable(
                 route = "field/{fieldId}",
                 arguments = listOf(navArgument("fieldId") { type = NavType.LongType })
@@ -219,6 +187,12 @@ private fun ScanScreen(
     var torchOn by remember { mutableStateOf(false) }
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
 
+    // -------- ML state --------
+    var autoAnalyze by remember { mutableStateOf(true) }
+    var analyzing by remember { mutableStateOf(false) }
+    var predictions by remember { mutableStateOf<List<Prediction>?>(null) }
+    var analysisError by remember { mutableStateOf<String?>(null) }
+
     // SAF picker with persistable permission
     val pickImageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -237,6 +211,14 @@ private fun ScanScreen(
                     context,
                     "Imported to Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
                 )
+                if (autoAnalyze) {
+                    analyzing = true
+                    runAnalysis(context, uri) { preds, err ->
+                        predictions = preds
+                        analysisError = err
+                        analyzing = false
+                    }
+                }
             }
         }
     }
@@ -280,6 +262,14 @@ private fun ScanScreen(
                                 context,
                                 "Saved to Photos & Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
                             )
+                            if (autoAnalyze) {
+                                analyzing = true
+                                runAnalysis(context, uri) { preds, err ->
+                                    predictions = preds
+                                    analysisError = err
+                                    analyzing = false
+                                }
+                            }
                         }
                     } ?: toast(context, "Saved (no Uri)")
                 }
@@ -290,13 +280,21 @@ private fun ScanScreen(
         )
     }
 
+    // Bind controller to lifecycle
+    DisposableEffect(lifecycleOwner) {
+        controller.bindToLifecycle(lifecycleOwner)
+        onDispose {
+            // release the optional interpreter when leaving Scan
+            TFLiteClassifier.shutdown()
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         if (hasCamPermission) {
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).apply {
                         this.controller = controller
-                        controller.bindToLifecycle(lifecycleOwner)
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                     }
                 },
@@ -308,15 +306,14 @@ private fun ScanScreen(
             }
         }
 
-        // Top row: Field selector • Flip • Torch
+        // Top row: Field selector • Flip • Torch • Auto-analyze toggle
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(0.2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Assign-to-field selector
             FieldPicker(
                 fields = fields.map { it.id to it.name },
                 selectedId = selectedFieldId,
@@ -326,9 +323,7 @@ private fun ScanScreen(
                 },
                 modifier = Modifier.weight(1f)
             )
-
             Spacer(Modifier.width(12.dp))
-
             Row(verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalButton(
                     onClick = {
@@ -345,10 +340,16 @@ private fun ScanScreen(
                         runCatching { controller.enableTorch(torchOn) }
                     }
                 ) { Text(if (torchOn) "Torch • On" else "Torch • Off") }
+                Spacer(Modifier.width(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Auto", style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.width(6.dp))
+                    Switch(checked = autoAnalyze, onCheckedChange = { autoAnalyze = it })
+                }
             }
         }
 
-        // Bottom bar: thumbnail • capture • upload • library
+        // Bottom bar: thumbnail • capture • analyze • upload • library
         Row(
             Modifier
                 .fillMaxWidth()
@@ -378,7 +379,26 @@ private fun ScanScreen(
                 contentPadding = PaddingValues(0.dp)
             ) { Text("Take Photo") }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(
+                    onClick = {
+                        val uri = lastPhotoUri
+                        if (uri == null) {
+                            toast(context, "No image to analyze")
+                        } else {
+                            scope.launch {
+                                analyzing = true
+                                runAnalysis(context, uri) { preds, err ->
+                                    predictions = preds
+                                    analysisError = err
+                                    analyzing = false
+                                }
+                            }
+                        }
+                    },
+                    enabled = !analyzing
+                ) { Text(if (analyzing) "Analyzing…" else "Analyze") }
+
                 FilledTonalButton(onClick = { pickImageLauncher.launch(arrayOf("image/*")) }) {
                     Text("Upload")
                 }
@@ -388,6 +408,24 @@ private fun ScanScreen(
             }
         }
 
+        // Quick analyzing overlay
+        if (analyzing) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .padding(top = 72.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                AssistChip(
+                    onClick = { },
+                    label = { Text("Analyzing…") },
+                    leadingIcon = { CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) }
+                )
+            }
+        }
+
+        // Preview dialog
         if (showPreview && lastPhotoUri != null) {
             AlertDialog(
                 onDismissRequest = { showPreview = false },
@@ -406,6 +444,39 @@ private fun ScanScreen(
                 }
             )
         }
+    }
+
+    // Predictions dialog
+    if (predictions != null || analysisError != null) {
+        AlertDialog(
+            onDismissRequest = { predictions = null; analysisError = null },
+            confirmButton = {
+                TextButton(onClick = { predictions = null; analysisError = null }) { Text("OK") }
+            },
+            title = { Text("Analysis") },
+            text = {
+                if (analysisError != null) {
+                    Text(analysisError!!)
+                } else {
+                    val preds = predictions.orEmpty()
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        preds.forEach { p ->
+                            Column {
+                                Text("${p.label}  •  ${formatPct(p.prob)}")
+                                LinearProgressIndicator(
+                                    progress = { p.prob.coerceIn(0f, 1f) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                )
+                            }
+                        }
+                        if (preds.isEmpty()) Text("No predictions.")
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -488,3 +559,5 @@ private fun ProfileScreen(onSignOut: () -> Unit) {
         Button(onClick = onSignOut) { Text("Sign out") }
     }
 }
+
+private fun formatPct(p: Float): String = String.format("%.1f%%", (p * 100f))
