@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
 import org.tensorflow.lite.Interpreter
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.FileInputStream
 import java.io.InputStreamReader
@@ -14,19 +15,33 @@ import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.exp
+import kotlin.math.ln
 
 data class Prediction(val label: String, val prob: Float)
+
+/** Rich result with uncertainty metrics */
+data class Inference(
+    val topK: List<Prediction>,
+    /** Entropy in nats (0..ln(K)). Lower is better (peaked). */
+    val entropy: Float,
+    /** Confidence quality in 0..1, computed as 1 - normalizedEntropy. Higher is better. */
+    val quality: Float
+)
 
 class TFLiteClassifier private constructor(
     private val interpreter: Interpreter,
     private val labels: List<String>,
     private val inputSize: Int = 192,
-    private val numChannels: Int = 3
+    private val numChannels: Int = 3,
+    /** Temperature for probability calibration (T=1 means no change). */
+    private val temperature: Float = 1.0f
 ) {
 
     companion object {
-        private const val MODEL_PATH = "model_float32.tflite" // your float32 model
-        private const val LABELS_PATH = "labels.txt"
+        // Update to your new asset names. If you ever need backwards-compat, add try/fallbacks.
+        private const val MODEL_PATH  = "model_float32_2025-09-28.tflite"
+        private const val LABELS_PATH = "labels_trained_order.txt"
+        private const val CALIB_PATH  = "calibration.json"
         private const val NUM_THREADS = 4
 
         @Volatile
@@ -54,7 +69,8 @@ class TFLiteClassifier private constructor(
             }
             val interpreter = Interpreter(model, options)
             val labels = loadLabels(ctx, LABELS_PATH)
-            return TFLiteClassifier(interpreter, labels)
+            val temp = loadTemperature(ctx, CALIB_PATH) // defaults to 1.0 if not found/parsable
+            return TFLiteClassifier(interpreter, labels, temperature = temp)
         }
 
         private fun loadModelFile(context: Context, assetName: String): MappedByteBuffer {
@@ -77,6 +93,19 @@ class TFLiteClassifier private constructor(
                 }
             }
         }
+
+        private fun loadTemperature(context: Context, assetName: String): Float {
+            return try {
+                context.assets.open(assetName).bufferedReader().use { br ->
+                    val txt = br.readText()
+                    val json = JSONObject(txt)
+                    val t = json.optDouble("temperature", 1.0)
+                    if (t.isNaN() || t <= 0.0) 1.0f else t.toFloat()
+                }
+            } catch (_: Throwable) {
+                1.0f // safe default if file missing or invalid
+            }
+        }
     }
 
     fun close() {
@@ -85,7 +114,8 @@ class TFLiteClassifier private constructor(
 
     /**
      * Predict on a Bitmap.
-     * Pipeline: RGB → resize 192×192 → float32 [0,1] → NHWC → logits → softmax
+     * Pipeline: RGB → resize 192×192 → float32 [0,1] → NHWC → logits → (logits/T) → softmax
+     * Signature unchanged; now returns **calibrated** probabilities if a temperature is present.
      */
     @Synchronized
     fun predict(bitmap: Bitmap, topK: Int = 3): List<Prediction> {
@@ -98,7 +128,8 @@ class TFLiteClassifier private constructor(
         val output = Array(1) { FloatArray(numClasses) }
         interpreter.run(inputBuffer, output)
 
-        val probs = softmax(output[0])
+        // Calibrated softmax: divide logits by T before exponentiating
+        val probs = softmaxCalibrated(output[0], temperature)
 
         return probs
             .mapIndexed { idx, p ->
@@ -114,6 +145,44 @@ class TFLiteClassifier private constructor(
         val bmp = decodeScaled(context, uri, maxDim = 1024)
             ?: error("Could not decode image: $uri")
         return predict(bmp, topK)
+    }
+
+    // ---------------------
+    //  New: Uncertainty API
+    // ---------------------
+
+    /** Predict + return entropy (in nats) and quality (1 - normalized entropy). */
+    @Synchronized
+    fun predictWithUncertainty(bitmap: Bitmap, topK: Int = 3): Inference {
+        val inputBuffer = bitmapToNHWCFloatBuffer(bitmap, inputSize, inputSize)
+
+        val outShape = interpreter.getOutputTensor(0).shape()
+        val numClasses = if (outShape.isNotEmpty()) outShape.last() else labels.size.coerceAtLeast(1)
+
+        val output = Array(1) { FloatArray(numClasses) }
+        interpreter.run(inputBuffer, output)
+
+        val probs = softmaxCalibrated(output[0], temperature)
+
+        val preds = probs
+            .mapIndexed { idx, p ->
+                val name = if (idx in labels.indices) labels[idx] else "class_$idx"
+                Prediction(name, p)
+            }
+            .sortedByDescending { it.prob }
+            .take(topK)
+
+        val h = entropy(probs)
+        val q = 1f - normalizedEntropy(probs)
+
+        return Inference(preds, h, q)
+    }
+
+    /** Convenience for URI input. */
+    fun predictFromUriWithUncertainty(context: Context, uri: Uri, topK: Int = 3): Inference {
+        val bmp = decodeScaled(context, uri, maxDim = 1024)
+            ?: error("Could not decode image: $uri")
+        return predictWithUncertainty(bmp, topK)
     }
 
     // --- Helpers ---
@@ -142,21 +211,51 @@ class TFLiteClassifier private constructor(
         return buffer
     }
 
-    private fun softmax(logits: FloatArray): FloatArray {
-        var max = Float.NEGATIVE_INFINITY
-        for (v in logits) if (v > max) max = v
+    /** Calibrated softmax: applies logits/T then standard softmax (numerically stable). */
+    private fun softmaxCalibrated(logits: FloatArray, temperature: Float): FloatArray {
+        val T = if (temperature > 0f) temperature else 1f
+        // find max(logits/T) for numerical stability
+        var maxVal = Float.NEGATIVE_INFINITY
+        for (v in logits) {
+            val z = v / T
+            if (z > maxVal) maxVal = z
+        }
+
         var sum = 0.0
         val exps = DoubleArray(logits.size)
         for (i in logits.indices) {
-            val e = exp((logits[i] - max).toDouble())
+            val z = logits[i] / T - maxVal
+            val e = exp(z.toDouble())
             exps[i] = e
             sum += e
         }
+
         val probs = FloatArray(logits.size)
+        if (sum == 0.0) {
+            // extremely defensive: fall back to uniform
+            val u = 1.0f / logits.size
+            for (i in logits.indices) probs[i] = u
+            return probs
+        }
         for (i in logits.indices) {
             probs[i] = (exps[i] / sum).toFloat()
         }
         return probs
+    }
+
+    /** Entropy in nats. */
+    private fun entropy(probs: FloatArray): Float {
+        var h = 0.0
+        for (p in probs) if (p > 0f) h -= (p.toDouble() * ln(p.toDouble()))
+        return h.toFloat()
+    }
+
+    /** Normalized entropy in 0..1 (divides by ln(K)). */
+    private fun normalizedEntropy(probs: FloatArray): Float {
+        val h = entropy(probs)
+        val k = probs.size.toDouble()
+        val hMax = ln(k)
+        return if (hMax > 0.0) (h / hMax).toFloat() else 0f
     }
 
     /** Efficiently decode large images with downsampling. */

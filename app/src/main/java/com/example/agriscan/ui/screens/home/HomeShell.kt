@@ -54,6 +54,7 @@ import com.google.firebase.ktx.Firebase
 import kotlinx.coroutines.launch
 import java.io.File
 import com.example.agriscan.core.runAnalysis
+import com.example.agriscan.ml.Inference   // <-- NEW
 
 private sealed class HomeTab(val route: String, val label: String) {
     data object Scan     : HomeTab("scan", "Scan")
@@ -190,7 +191,7 @@ private fun ScanScreen(
     // -------- ML state --------
     var autoAnalyze by remember { mutableStateOf(true) }
     var analyzing by remember { mutableStateOf(false) }
-    var predictions by remember { mutableStateOf<List<Prediction>?>(null) }
+    var inference by remember { mutableStateOf<Inference?>(null) }     // <-- CHANGED
     var analysisError by remember { mutableStateOf<String?>(null) }
 
     // SAF picker with persistable permission
@@ -213,8 +214,8 @@ private fun ScanScreen(
                 )
                 if (autoAnalyze) {
                     analyzing = true
-                    runAnalysis(context, uri) { preds, err ->
-                        predictions = preds
+                    runAnalysis(context, uri) { res, err ->   // <-- CHANGED
+                        inference = res                       // <-- CHANGED
                         analysisError = err
                         analyzing = false
                     }
@@ -264,8 +265,8 @@ private fun ScanScreen(
                             )
                             if (autoAnalyze) {
                                 analyzing = true
-                                runAnalysis(context, uri) { preds, err ->
-                                    predictions = preds
+                                runAnalysis(context, uri) { res, err ->   // <-- CHANGED
+                                    inference = res                       // <-- CHANGED
                                     analysisError = err
                                     analyzing = false
                                 }
@@ -388,8 +389,8 @@ private fun ScanScreen(
                         } else {
                             scope.launch {
                                 analyzing = true
-                                runAnalysis(context, uri) { preds, err ->
-                                    predictions = preds
+                                runAnalysis(context, uri) { res, err ->   // <-- CHANGED
+                                    inference = res                       // <-- CHANGED
                                     analysisError = err
                                     analyzing = false
                                 }
@@ -446,21 +447,26 @@ private fun ScanScreen(
         }
     }
 
-    // Predictions dialog
-    if (predictions != null || analysisError != null) {
+    // Results dialog (uses inference instead of predictions)
+    if (inference != null || analysisError != null) {
         AlertDialog(
-            onDismissRequest = { predictions = null; analysisError = null },
+            onDismissRequest = { inference = null; analysisError = null },
             confirmButton = {
-                TextButton(onClick = { predictions = null; analysisError = null }) { Text("OK") }
+                TextButton(onClick = { inference = null; analysisError = null }) { Text("OK") }
             },
             title = { Text("Analysis") },
             text = {
                 if (analysisError != null) {
                     Text(analysisError!!)
                 } else {
-                    val preds = predictions.orEmpty()
+                    val inf = inference!!
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        preds.forEach { p ->
+                        // Optional: surface the uncertainty
+                        Text("Confidence quality: ${formatPct(inf.quality)}")
+                        Text("Entropy: ${String.format("%.3f", inf.entropy)} nats")
+
+                        Spacer(Modifier.height(4.dp))
+                        inf.topK.forEach { p: Prediction ->
                             Column {
                                 Text("${p.label}  •  ${formatPct(p.prob)}")
                                 LinearProgressIndicator(
@@ -472,7 +478,7 @@ private fun ScanScreen(
                                 )
                             }
                         }
-                        if (preds.isEmpty()) Text("No predictions.")
+                        if (inf.topK.isEmpty()) Text("No predictions.")
                     }
                 }
             }
