@@ -40,6 +40,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import coil.compose.AsyncImage
+import com.example.agriscan.core.runAnalysis
+import com.example.agriscan.ml.Inference
 import com.example.agriscan.ml.Prediction
 import com.example.agriscan.ml.TFLiteClassifier
 import com.example.agriscan.ui.AuthViewModel
@@ -49,12 +51,14 @@ import com.example.agriscan.ui.screens.FieldDetailScreen
 import com.example.agriscan.ui.screens.FieldsScreen
 import com.example.agriscan.ui.screens.InsightsScreen
 import com.example.agriscan.ui.screens.LibraryScreen
+import com.example.agriscan.ui.util.ConfidenceBand
+import com.example.agriscan.ui.util.classifyConfidence
+import com.example.agriscan.ui.util.prettyLabel
+import com.example.agriscan.ui.util.formatPct
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.ktx.Firebase
 import kotlinx.coroutines.launch
 import java.io.File
-import com.example.agriscan.core.runAnalysis
-import com.example.agriscan.ml.Inference   // <-- NEW
 
 private sealed class HomeTab(val route: String, val label: String) {
     data object Scan     : HomeTab("scan", "Scan")
@@ -191,7 +195,7 @@ private fun ScanScreen(
     // -------- ML state --------
     var autoAnalyze by remember { mutableStateOf(true) }
     var analyzing by remember { mutableStateOf(false) }
-    var inference by remember { mutableStateOf<Inference?>(null) }     // <-- CHANGED
+    var inference by remember { mutableStateOf<Inference?>(null) }
     var analysisError by remember { mutableStateOf<String?>(null) }
 
     // SAF picker with persistable permission
@@ -214,8 +218,8 @@ private fun ScanScreen(
                 )
                 if (autoAnalyze) {
                     analyzing = true
-                    runAnalysis(context, uri) { res, err ->   // <-- CHANGED
-                        inference = res                       // <-- CHANGED
+                    runAnalysis(context, uri) { res, err ->
+                        inference = res
                         analysisError = err
                         analyzing = false
                     }
@@ -265,8 +269,8 @@ private fun ScanScreen(
                             )
                             if (autoAnalyze) {
                                 analyzing = true
-                                runAnalysis(context, uri) { res, err ->   // <-- CHANGED
-                                    inference = res                       // <-- CHANGED
+                                runAnalysis(context, uri) { res, err ->
+                                    inference = res
                                     analysisError = err
                                     analyzing = false
                                 }
@@ -389,8 +393,8 @@ private fun ScanScreen(
                         } else {
                             scope.launch {
                                 analyzing = true
-                                runAnalysis(context, uri) { res, err ->   // <-- CHANGED
-                                    inference = res                       // <-- CHANGED
+                                runAnalysis(context, uri) { res, err ->
+                                    inference = res
                                     analysisError = err
                                     analyzing = false
                                 }
@@ -460,15 +464,39 @@ private fun ScanScreen(
                     Text(analysisError!!)
                 } else {
                     val inf = inference!!
+
+                    // NEW: compute band & choose a header color
+                    val band = classifyConfidence(
+                        quality  = inf.quality,
+                        top1Prob = inf.topK.firstOrNull()?.prob ?: 0f
+                    )
+                    val headerColor = when (band) {
+                        ConfidenceBand.HIGH   -> MaterialTheme.colorScheme.primary
+                        ConfidenceBand.MEDIUM -> MaterialTheme.colorScheme.tertiary
+                        ConfidenceBand.LOW    -> MaterialTheme.colorScheme.error
+                    }
+
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        // Optional: surface the uncertainty
-                        Text("Confidence quality: ${formatPct(inf.quality)}")
+                        // NEW: banded header line
+                        Text(
+                            text = when (band) {
+                                ConfidenceBand.HIGH   -> "High confidence • ${formatPct(inf.quality)}"
+                                ConfidenceBand.MEDIUM -> "Medium confidence • ${formatPct(inf.quality)}"
+                                ConfidenceBand.LOW    -> "Low confidence • consider another photo"
+                            },
+                            color = headerColor,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        // Optional: surface entropy (nats)
                         Text("Entropy: ${String.format("%.3f", inf.entropy)} nats")
 
                         Spacer(Modifier.height(4.dp))
+
+                        // Prettified labels + bars
                         inf.topK.forEach { p: Prediction ->
+                            val label = prettyLabel(p.label)
                             Column {
-                                Text("${p.label}  •  ${formatPct(p.prob)}")
+                                Text("$label  •  ${formatPct(p.prob)}")
                                 LinearProgressIndicator(
                                     progress = { p.prob.coerceIn(0f, 1f) },
                                     modifier = Modifier
@@ -565,5 +593,3 @@ private fun ProfileScreen(onSignOut: () -> Unit) {
         Button(onClick = onSignOut) { Text("Sign out") }
     }
 }
-
-private fun formatPct(p: Float): String = String.format("%.1f%%", (p * 100f))

@@ -53,9 +53,9 @@ fun runAnalysis(
 
             // Calibrated predictions + uncertainty (entropy + quality)
             val res = clf.predictFromUriWithUncertainty(context, uri, topK = 3)
-            // res.topK -> your existing list
-            // res.quality (0..1) -> drive UI gray-out
-            // res.entropy (nats) -> display if you want the raw number
+            // res.topK    -> list of Prediction(label, prob)
+            // res.quality -> 0..1 (higher means more confident / lower entropy)
+            // res.entropy -> in nats
 
             withContext(Dispatchers.Main) { onResult(res, null) }
         } catch (e: Exception) {
