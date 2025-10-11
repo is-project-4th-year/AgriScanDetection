@@ -31,7 +31,7 @@ data class Inference(
 class TFLiteClassifier private constructor(
     private val interpreter: Interpreter,
     private val labels: List<String>,
-    private val inputSize: Int = 192,
+    private val inputSize: Int = 224,
     private val numChannels: Int = 3,
     /** Temperature for probability calibration (T=1 means no change). */
     private val temperature: Float = 1.0f
@@ -39,9 +39,9 @@ class TFLiteClassifier private constructor(
 
     companion object {
         // Update to your new asset names. If you ever need backwards-compat, add try/fallbacks.
-        private const val MODEL_PATH  = "model_float32_2025-09-28.tflite"
-        private const val LABELS_PATH = "labels_trained_order.txt"
-        private const val CALIB_PATH  = "calibration.json"
+        private const val MODEL_PATH  = "new_model_float32.tflite"
+        private const val LABELS_PATH = "new_labels_trained_order.txt"
+        private const val CALIB_PATH  = "new_calibration.json"
         private const val NUM_THREADS = 4
 
         @Volatile
