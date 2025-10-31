@@ -3,11 +3,10 @@ package com.example.agriscan.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
-import androidx.room.Room
 import com.example.agriscan.data.AuthRepository
 import com.example.agriscan.data.FieldRepository
 import com.example.agriscan.data.LibraryRepository
-import com.example.agriscan.data.local.AgriDb
+import com.example.agriscan.data.local.AppDatabase
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 
@@ -16,15 +15,9 @@ fun defaultRepo() = AuthRepository(Firebase.auth)
 
 // --- Single Room DB instance remembered in Compose ---
 @Composable
-fun defaultDb(): AgriDb {
+fun defaultDb(): AppDatabase {
     val appCtx = LocalContext.current.applicationContext
-    return remember {
-        Room.databaseBuilder(appCtx, AgriDb::class.java, "agriscan.db")
-            // Dev-only safety: if schema changes, wipe & recreate instead of crashing.
-            // You chose Option A, so we do NOT add explicit migrations here.
-            .fallbackToDestructiveMigration()
-            .build()
-    }
+    return remember { AppDatabase.get(appCtx) }
 }
 
 // --- Repositories backed by Room ---
@@ -39,6 +32,7 @@ fun defaultLibRepo(): LibraryRepository {
     val db = defaultDb()
     return remember { LibraryRepository(db.captureDao()) }
 }
+
 
 // --- ViewModel provider ---
 @Composable

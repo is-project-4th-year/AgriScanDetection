@@ -47,6 +47,7 @@ import com.example.agriscan.ml.TFLiteClassifier
 import com.example.agriscan.ui.AuthViewModel
 import com.example.agriscan.ui.defaultFieldRepo
 import com.example.agriscan.ui.defaultLibRepo
+import com.example.agriscan.ui.defaultDb
 import com.example.agriscan.ui.screens.FieldDetailScreen
 import com.example.agriscan.ui.screens.FieldsScreen
 import com.example.agriscan.ui.screens.InsightsScreen
@@ -59,6 +60,17 @@ import com.google.firebase.auth.ktx.auth
 import com.google.firebase.ktx.Firebase
 import kotlinx.coroutines.launch
 import java.io.File
+
+// RAG imports
+import com.example.agriscan.rag.KBLoader
+import com.example.agriscan.rag.AdvisorService
+import com.example.agriscan.rag.TemplatedAgent
+
+// for scrollable Advisor answer
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+
 
 private sealed class HomeTab(val route: String, val label: String) {
     data object Scan     : HomeTab("scan", "Scan")
@@ -143,7 +155,12 @@ private fun ScanScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val lib = defaultLibRepo()
     val fieldsRepo = defaultFieldRepo()
+    val db = defaultDb()
     val scope = rememberCoroutineScope()
+
+    // RAG services
+    val kb = remember { KBLoader(context) }
+    val advisorService = remember { AdvisorService(kb, db.captureDao(), db.adviceDao(), TemplatedAgent()) }
 
     val controller = remember {
         LifecycleCameraController(context).apply {
@@ -157,7 +174,7 @@ private fun ScanScreen(
     var selectedFieldId by remember { mutableStateOf<Long?>(null) }
     var selectedFieldName by remember { mutableStateOf("None") }
 
-    // Camera / legacy write permissions
+    // Camera / storage permissions
     var hasCamPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -192,11 +209,19 @@ private fun ScanScreen(
     var torchOn by remember { mutableStateOf(false) }
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
 
-    // -------- ML state --------
+    // ML state
     var autoAnalyze by remember { mutableStateOf(true) }
     var analyzing by remember { mutableStateOf(false) }
     var inference by remember { mutableStateOf<Inference?>(null) }
     var analysisError by remember { mutableStateOf<String?>(null) }
+
+    // RAG UI state
+    var currentCaptureId by remember { mutableStateOf<Long?>(null) }
+    var currentCaptureUri by remember { mutableStateOf<Uri?>(null) }
+    var userQuestion by remember { mutableStateOf("What should I do now?") }
+    var asking by remember { mutableStateOf(false) }
+    var advisorAnswer by remember { mutableStateOf<String?>(null) }
+    var advisorSources by remember { mutableStateOf<List<String>>(emptyList()) }
 
     // SAF picker with persistable permission
     val pickImageLauncher = rememberLauncherForActivityResult(
@@ -210,18 +235,35 @@ private fun ScanScreen(
                 )
             }
             lastPhotoUri = uri
+            currentCaptureUri = uri
             scope.launch {
+                // 1) insert via repository
                 lib.addCapture(uri.toString(), fieldId = selectedFieldId)
-                toast(
-                    context,
-                    "Imported to Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
-                )
+                // 2) resolve DB id by uri
+                val row = db.captureDao().findByUri(uri.toString())
+                currentCaptureId = row?.id
+
+                toast(context, "Imported to Library${selectedFieldId?.let { " • \"$selectedFieldName\"" } ?: ""}")
                 if (autoAnalyze) {
                     analyzing = true
                     runAnalysis(context, uri) { res, err ->
                         inference = res
                         analysisError = err
                         analyzing = false
+
+                        // persist prediction to Room
+                        scope.launch {
+                            val top = res?.topK?.firstOrNull()
+                            val capId = currentCaptureId
+                            if (top != null && capId != null) {
+                                db.captureDao().setPrediction(
+                                    id = capId,
+                                    predictedClass = top.label,
+                                    top1Prob = top.prob,
+                                    modelVersion = "mobilenetv2-v1"
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -261,18 +303,39 @@ private fun ScanScreen(
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     output.savedUri?.let { uri ->
                         lastPhotoUri = uri
+                        currentCaptureUri = uri
                         scope.launch {
+                            // 1) insert via repository
                             lib.addCapture(uri.toString(), fieldId = selectedFieldId)
+                            // 2) resolve DB id by uri
+                            val row = db.captureDao().findByUri(uri.toString())
+                            currentCaptureId = row?.id
+
                             toast(
                                 context,
-                                "Saved to Photos & Library${selectedFieldId?.let { " • assigned to \"$selectedFieldName\"" } ?: ""}"
+                                "Saved to Photos & Library${selectedFieldId?.let { " • \"$selectedFieldName\"" } ?: ""}"
                             )
+
                             if (autoAnalyze) {
                                 analyzing = true
                                 runAnalysis(context, uri) { res, err ->
                                     inference = res
                                     analysisError = err
                                     analyzing = false
+
+                                    // persist prediction
+                                    scope.launch {
+                                        val top = res?.topK?.firstOrNull()
+                                        val capId = currentCaptureId
+                                        if (top != null && capId != null) {
+                                            db.captureDao().setPrediction(
+                                                id = capId,
+                                                predictedClass = top.label,
+                                                top1Prob = top.prob,
+                                                modelVersion = "mobilenetv2-v1"
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -288,10 +351,7 @@ private fun ScanScreen(
     // Bind controller to lifecycle
     DisposableEffect(lifecycleOwner) {
         controller.bindToLifecycle(lifecycleOwner)
-        onDispose {
-            // release the optional interpreter when leaving Scan
-            TFLiteClassifier.shutdown()
-        }
+        onDispose { TFLiteClassifier.shutdown() }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -311,7 +371,7 @@ private fun ScanScreen(
             }
         }
 
-        // Top row: Field selector • Flip • Torch • Auto-analyze toggle
+        // Top row: field picker, flip, torch, auto
         Row(
             Modifier
                 .fillMaxWidth()
@@ -354,14 +414,14 @@ private fun ScanScreen(
             }
         }
 
-        // Bottom bar: thumbnail • capture • analyze • upload • library
+        // Bottom bar
+        // Bottom bar (REPLACE THIS WHOLE BLOCK)
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(24.dp)
+                .padding(horizontal = 16.dp, vertical = 24.dp)   // was 24.dp all around → save width
                 .align(Alignment.BottomCenter),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            verticalAlignment = Alignment.CenterVertically
         ) {
             if (lastPhotoUri != null) {
                 AsyncImage(
@@ -377,14 +437,25 @@ private fun ScanScreen(
                 Box(Modifier.size(56.dp))
             }
 
+            Spacer(Modifier.width(12.dp))
+
             Button(
                 onClick = { capture() },
                 shape = CircleShape,
+                // slightly smaller to free some width; you can keep 72.dp if you prefer
                 modifier = Modifier.size(72.dp),
                 contentPadding = PaddingValues(0.dp)
             ) { Text("Take Photo") }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Push the actions group to the right and let it use remaining width
+            Spacer(Modifier.weight(1f))
+
+            // Make the action buttons horizontally scrollable so nothing gets clipped
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 FilledTonalButton(
                     onClick = {
                         val uri = lastPhotoUri
@@ -397,21 +468,40 @@ private fun ScanScreen(
                                     inference = res
                                     analysisError = err
                                     analyzing = false
+
+                                    // persist prediction
+                                    scope.launch {
+                                        val top = res?.topK?.firstOrNull()
+                                        val capId = currentCaptureId
+                                        if (top != null && capId != null) {
+                                            db.captureDao().setPrediction(
+                                                id = capId,
+                                                predictedClass = top.label,
+                                                top1Prob = top.prob,
+                                                modelVersion = "mobilenetv2-v1"
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     },
-                    enabled = !analyzing
-                ) { Text(if (analyzing) "Analyzing…" else "Analyze") }
+                    enabled = !analyzing,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp) // tighter padding
+                ) { Text(if (analyzing) "Analyzing…" else "Analyze", maxLines = 1) }
 
-                FilledTonalButton(onClick = { pickImageLauncher.launch(arrayOf("image/*")) }) {
-                    Text("Upload")
-                }
-                FilledTonalButton(onClick = onOpenLibrary) {
-                    Text("Library")
-                }
+                FilledTonalButton(
+                    onClick = { pickImageLauncher.launch(arrayOf("image/*")) },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) { Text("Upload", maxLines = 1) }
+
+                FilledTonalButton(
+                    onClick = onOpenLibrary,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) { Text("Library", maxLines = 1) }
             }
         }
+
 
         // Quick analyzing overlay
         if (analyzing) {
@@ -451,12 +541,24 @@ private fun ScanScreen(
         }
     }
 
-    // Results dialog (uses inference instead of predictions)
+    // Analysis dialog + Ask Advisor (offline)
     if (inference != null || analysisError != null) {
         AlertDialog(
-            onDismissRequest = { inference = null; analysisError = null },
+            onDismissRequest = {
+                inference = null
+                analysisError = null
+                advisorAnswer = null
+                advisorSources = emptyList()
+            },
             confirmButton = {
-                TextButton(onClick = { inference = null; analysisError = null }) { Text("OK") }
+                TextButton(
+                    onClick = {
+                        inference = null
+                        analysisError = null
+                        advisorAnswer = null
+                        advisorSources = emptyList()
+                    }
+                ) { Text("OK") }
             },
             title = { Text("Analysis") },
             text = {
@@ -464,20 +566,17 @@ private fun ScanScreen(
                     Text(analysisError!!)
                 } else {
                     val inf = inference!!
-
-                    // NEW: compute band & choose a header color
                     val band = classifyConfidence(
                         quality  = inf.quality,
                         top1Prob = inf.topK.firstOrNull()?.prob ?: 0f
                     )
                     val headerColor = when (band) {
                         ConfidenceBand.HIGH   -> MaterialTheme.colorScheme.primary
-                        ConfidenceBand.MEDIUM -> MaterialTheme.colorScheme.tertiary
+                        ConfidenceBand.MEDIUM -> MaterialTheme.typography.bodyMedium.color
                         ConfidenceBand.LOW    -> MaterialTheme.colorScheme.error
                     }
 
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        // NEW: banded header line
                         Text(
                             text = when (band) {
                                 ConfidenceBand.HIGH   -> "High confidence • ${formatPct(inf.quality)}"
@@ -487,12 +586,10 @@ private fun ScanScreen(
                             color = headerColor,
                             style = MaterialTheme.typography.titleMedium
                         )
-                        // Optional: surface entropy (nats)
                         Text("Entropy: ${String.format("%.3f", inf.entropy)} nats")
 
                         Spacer(Modifier.height(4.dp))
 
-                        // Prettified labels + bars
                         inf.topK.forEach { p: Prediction ->
                             val label = prettyLabel(p.label)
                             Column {
@@ -507,6 +604,91 @@ private fun ScanScreen(
                             }
                         }
                         if (inf.topK.isEmpty()) Text("No predictions.")
+
+                        // ---------------- Advisor (offline) ----------------
+                        Spacer(Modifier.height(12.dp))
+                        Divider()
+                        Spacer(Modifier.height(8.dp))
+
+                        Text("Advisor", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Get quick, offline guidance based on the predicted disease.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = userQuestion,
+                            onValueChange = { userQuestion = it },
+                            label = { Text("Your question") },
+                            singleLine = false,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        val canAsk = (currentCaptureId != null) && (inference?.topK?.isNotEmpty() == true)
+
+                        Button(
+                            enabled = canAsk && !asking,
+                            onClick = {
+                                val capId = currentCaptureId
+                                if (capId == null) {
+                                    toast(context, "Could not link this photo in the database.")
+                                    return@Button
+                                }
+                                asking = true
+                                advisorAnswer = null
+                                advisorSources = emptyList()
+                                scope.launch {
+                                    try {
+                                        val session = advisorService.advise(
+                                            captureId = capId,
+                                            userQuestion = userQuestion.ifBlank { "What should I do now?" }
+                                        )
+                                        advisorAnswer = session.answerText
+                                        val titles = session.topDocIdsCsv
+                                            .split(",")
+                                            .mapNotNull { kb.titleOf(it.trim()) }   // <-- reliable source titles
+                                        advisorSources = titles
+                                    } catch (e: Exception) {
+                                        advisorAnswer = "Advisor failed: ${e.message}"
+                                        advisorSources = emptyList()
+                                    } finally {
+                                        asking = false
+                                    }
+                                }
+                            }
+                        ) { Text(if (asking) "Preparing…" else "Ask Advisor (offline)") }
+
+                        if (advisorAnswer != null) {
+                            Spacer(Modifier.height(12.dp))
+                            Text("Advisor answer", style = MaterialTheme.typography.titleSmall)
+
+                            // Scrollable answer so it won't be cut off
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 0.dp, max = 280.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(top = 6.dp, bottom = 6.dp)
+                            ) {
+                                Text(advisorAnswer!!)
+                            }
+
+                            // Sources list proves KB retrieval worked
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Sources (${advisorSources.size})",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            if (advisorSources.isEmpty()) {
+                                Text("• (none) — check that your kb.jsonl class names match model labels.")
+                            } else {
+                                advisorSources.forEach { t -> Text("• $t") }
+                            }
+                        }
+                        // ---------------------------------------------------
                     }
                 }
             }
@@ -541,7 +723,7 @@ private fun FieldPicker(
         ) {
             OutlinedTextField(
                 value = TextFieldValue(label),
-                onValueChange = { /* read-only */ },
+                onValueChange = { },
                 readOnly = true,
                 label = { Text("Field") },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
@@ -557,16 +739,14 @@ private fun FieldPicker(
                 DropdownMenuItem(
                     text = { Text("None") },
                     onClick = {
-                        onSelect(null, null)
-                        expanded = false
+                        onSelect(null, null); expanded = false
                     }
                 )
                 fields.forEach { (id, name) ->
                     DropdownMenuItem(
                         text = { Text(name) },
                         onClick = {
-                            onSelect(id, name)
-                            expanded = false
+                            onSelect(id, name); expanded = false
                         }
                     )
                 }

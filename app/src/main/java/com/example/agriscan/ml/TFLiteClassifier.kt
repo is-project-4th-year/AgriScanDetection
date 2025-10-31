@@ -3,7 +3,6 @@ package com.example.agriscan.ml
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.net.Uri
 import org.tensorflow.lite.Interpreter
 import org.json.JSONObject
@@ -14,17 +13,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
-import kotlin.math.exp
 import kotlin.math.ln
 
 data class Prediction(val label: String, val prob: Float)
 
-/** Rich result with uncertainty metrics */
 data class Inference(
     val topK: List<Prediction>,
-    /** Entropy in nats (0..ln(K)). Lower is better (peaked). */
+    /** Entropy in nats (0..ln(K)). Lower is better. */
     val entropy: Float,
-    /** Confidence quality in 0..1, computed as 1 - normalizedEntropy. Higher is better. */
+    /** Quality in 0..1 = 1 - normalizedEntropy. Higher is better. */
     val quality: Float
 )
 
@@ -33,19 +30,17 @@ class TFLiteClassifier private constructor(
     private val labels: List<String>,
     private val inputSize: Int = 224,
     private val numChannels: Int = 3,
-    /** Temperature for probability calibration (T=1 means no change). */
+    /** Temperature for probability calibration (T=1 = no change). */
     private val temperature: Float = 1.0f
 ) {
 
     companion object {
-        // Update to your new asset names. If you ever need backwards-compat, add try/fallbacks.
-        private const val MODEL_PATH  = "new_model_float32.tflite"
-        private const val LABELS_PATH = "new_labels_trained_order.txt"
+        private const val MODEL_PATH  = "model_fp32.tflite"  // or "model_int8.tflite"
+        private const val LABELS_PATH = "labels.txt"
         private const val CALIB_PATH  = "new_calibration.json"
         private const val NUM_THREADS = 4
 
-        @Volatile
-        private var instance: TFLiteClassifier? = null
+        @Volatile private var instance: TFLiteClassifier? = null
 
         fun getInstance(context: Context): TFLiteClassifier {
             return instance ?: synchronized(this) {
@@ -53,7 +48,6 @@ class TFLiteClassifier private constructor(
             }
         }
 
-        /** Optional: call when leaving Scan screen to free native resources. */
         fun shutdown() {
             synchronized(this) {
                 try { instance?.close() } catch (_: Throwable) {}
@@ -65,11 +59,17 @@ class TFLiteClassifier private constructor(
             val model = loadModelFile(ctx, MODEL_PATH)
             val options = Interpreter.Options().apply {
                 setNumThreads(NUM_THREADS)
-                setUseXNNPACK(true) // good for float32 models
+                setUseXNNPACK(true)
             }
             val interpreter = Interpreter(model, options)
             val labels = loadLabels(ctx, LABELS_PATH)
-            val temp = loadTemperature(ctx, CALIB_PATH) // defaults to 1.0 if not found/parsable
+            val temp = loadTemperature(ctx, CALIB_PATH)
+
+            val outShape = interpreter.getOutputTensor(0).shape()
+            val outK = if (outShape.isNotEmpty()) outShape.last() else labels.size
+            require(outK == labels.size) {
+                "Model output classes ($outK) != labels size (${labels.size}). Ensure labels.txt matches training."
+            }
             return TFLiteClassifier(interpreter, labels, temperature = temp)
         }
 
@@ -87,9 +87,7 @@ class TFLiteClassifier private constructor(
         private fun loadLabels(context: Context, assetName: String): List<String> {
             context.assets.open(assetName).use { input ->
                 BufferedReader(InputStreamReader(input)).useLines { seq ->
-                    return seq.map { it.trim() }
-                        .filter { it.isNotEmpty() }
-                        .toList()
+                    return seq.map { it.trim() }.filter { it.isNotEmpty() }.toList()
                 }
             }
         }
@@ -103,7 +101,7 @@ class TFLiteClassifier private constructor(
                     if (t.isNaN() || t <= 0.0) 1.0f else t.toFloat()
                 }
             } catch (_: Throwable) {
-                1.0f // safe default if file missing or invalid
+                1.0f
             }
         }
     }
@@ -112,145 +110,116 @@ class TFLiteClassifier private constructor(
         try { interpreter.close() } catch (_: Throwable) {}
     }
 
-    /**
-     * Predict on a Bitmap.
-     * Pipeline: RGB → resize 192×192 → float32 [0,1] → NHWC → logits → (logits/T) → softmax
-     * Signature unchanged; now returns **calibrated** probabilities if a temperature is present.
-     */
+    /** Predict on a Bitmap. Returns topK with calibrated probabilities if temperature != 1. */
     @Synchronized
     fun predict(bitmap: Bitmap, topK: Int = 3): List<Prediction> {
         val inputBuffer = bitmapToNHWCFloatBuffer(bitmap, inputSize, inputSize)
-
-        // ⚠️ Size output from the model, not from labels, to avoid mismatch crashes.
-        val outShape = interpreter.getOutputTensor(0).shape() // e.g. [1, 15] or [15]
+        val outShape = interpreter.getOutputTensor(0).shape()
         val numClasses = if (outShape.isNotEmpty()) outShape.last() else labels.size.coerceAtLeast(1)
-
         val output = Array(1) { FloatArray(numClasses) }
         interpreter.run(inputBuffer, output)
+        val probsRaw = output[0]
+        val probs = if (temperature != 1f) temperatureScaleProbs(probsRaw, temperature) else probsRaw
 
-        // Calibrated softmax: divide logits by T before exponentiating
-        val probs = softmaxCalibrated(output[0], temperature)
-
-        return probs
-            .mapIndexed { idx, p ->
-                val name = if (idx in labels.indices) labels[idx] else "class_$idx"
-                Prediction(name, p)
-            }
-            .sortedByDescending { it.prob }
-            .take(topK)
+        return probs.mapIndexed { idx, p ->
+            Prediction(if (idx in labels.indices) labels[idx] else "class_$idx", p)
+        }.sortedByDescending { it.prob }.take(topK)
     }
 
-    /** Decode a URI efficiently (downsample) then predict. */
-    fun predictFromUri(context: Context, uri: Uri, topK: Int = 3): List<Prediction> {
-        val bmp = decodeScaled(context, uri, maxDim = 1024)
-            ?: error("Could not decode image: $uri")
-        return predict(bmp, topK)
-    }
-
-    // ---------------------
-    //  New: Uncertainty API
-    // ---------------------
-
-    /** Predict + return entropy (in nats) and quality (1 - normalized entropy). */
+    /** Predict + uncertainty metrics (entropy/quality). */
     @Synchronized
     fun predictWithUncertainty(bitmap: Bitmap, topK: Int = 3): Inference {
         val inputBuffer = bitmapToNHWCFloatBuffer(bitmap, inputSize, inputSize)
-
         val outShape = interpreter.getOutputTensor(0).shape()
         val numClasses = if (outShape.isNotEmpty()) outShape.last() else labels.size.coerceAtLeast(1)
-
         val output = Array(1) { FloatArray(numClasses) }
         interpreter.run(inputBuffer, output)
+        val probsRaw = output[0]
+        val probs = if (temperature != 1f) temperatureScaleProbs(probsRaw, temperature) else probsRaw
 
-        val probs = softmaxCalibrated(output[0], temperature)
-
-        val preds = probs
-            .mapIndexed { idx, p ->
-                val name = if (idx in labels.indices) labels[idx] else "class_$idx"
-                Prediction(name, p)
-            }
-            .sortedByDescending { it.prob }
-            .take(topK)
+        val preds = probs.mapIndexed { idx, p ->
+            Prediction(if (idx in labels.indices) labels[idx] else "class_$idx", p)
+        }.sortedByDescending { it.prob }.take(topK)
 
         val h = entropy(probs)
         val q = 1f - normalizedEntropy(probs)
-
         return Inference(preds, h, q)
     }
 
-    /** Convenience for URI input. */
+    fun predictFromUri(context: Context, uri: Uri, topK: Int = 3): List<Prediction> {
+        val bmp = decodeScaled(context, uri, maxDim = 1024) ?: error("Could not decode image: $uri")
+        return predict(bmp, topK)
+    }
+
     fun predictFromUriWithUncertainty(context: Context, uri: Uri, topK: Int = 3): Inference {
-        val bmp = decodeScaled(context, uri, maxDim = 1024)
-            ?: error("Could not decode image: $uri")
+        val bmp = decodeScaled(context, uri, maxDim = 1024) ?: error("Could not decode image: $uri")
         return predictWithUncertainty(bmp, topK)
     }
 
-    // --- Helpers ---
+    // -------- Helpers --------
 
+    private fun centerCropSquare(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val size = minOf(w, h)
+        val x = (w - size) / 2
+        val y = (h - size) / 2
+        return Bitmap.createBitmap(src, x, y, size, size)
+    }
+
+    /** Feed **0..255 floats**; Normalization layer in graph handles scaling. */
     private fun bitmapToNHWCFloatBuffer(src: Bitmap, dstW: Int, dstH: Int): ByteBuffer {
-        val resized = if (src.width != dstW || src.height != dstH) {
-            Bitmap.createScaledBitmap(src, dstW, dstH, true)
-        } else src
+        val cropped = centerCropSquare(src)
+        val resized = if (cropped.width != dstW || cropped.height != dstH) {
+            Bitmap.createScaledBitmap(cropped, dstW, dstH, true)
+        } else cropped
 
-        val buffer = ByteBuffer.allocateDirect(4 * dstW * dstH * numChannels).apply {
-            order(ByteOrder.nativeOrder())
-        }
-
-        // RGB in [0,1], NHWC order
-        for (y in 0 until dstH) {
-            for (x in 0 until dstW) {
-                val c = resized.getPixel(x, y)
-                buffer.putFloat(Color.red(c) / 255f)
-                buffer.putFloat(Color.green(c) / 255f)
-                buffer.putFloat(Color.blue(c) / 255f)
-            }
+        val buffer = ByteBuffer.allocateDirect(4 * dstW * dstH * numChannels).order(ByteOrder.nativeOrder())
+        val ints = IntArray(dstW * dstH)
+        resized.getPixels(ints, 0, dstW, 0, 0, dstW, dstH)
+        var i = 0
+        while (i < ints.size) {
+            val c = ints[i]
+            buffer.putFloat(((c shr 16) and 0xFF).toFloat()) // R
+            buffer.putFloat(((c shr 8) and 0xFF).toFloat())  // G
+            buffer.putFloat((c and 0xFF).toFloat())          // B
+            i++
         }
         buffer.rewind()
 
-        if (resized !== src) resized.recycle()
+        if (resized !== src && resized !== cropped) resized.recycle()
+        if (cropped !== src) cropped.recycle()
         return buffer
     }
 
-    /** Calibrated softmax: applies logits/T then standard softmax (numerically stable). */
-    private fun softmaxCalibrated(logits: FloatArray, temperature: Float): FloatArray {
+    private fun temperatureScaleProbs(probsIn: FloatArray, temperature: Float): FloatArray {
         val T = if (temperature > 0f) temperature else 1f
-        // find max(logits/T) for numerical stability
-        var maxVal = Float.NEGATIVE_INFINITY
-        for (v in logits) {
-            val z = v / T
-            if (z > maxVal) maxVal = z
-        }
+        if (T == 1f) return probsIn.copyOf()
 
         var sum = 0.0
-        val exps = DoubleArray(logits.size)
-        for (i in logits.indices) {
-            val z = logits[i] / T - maxVal
-            val e = exp(z.toDouble())
-            exps[i] = e
-            sum += e
+        val powered = DoubleArray(probsIn.size)
+        for (i in probsIn.indices) {
+            val v = probsIn[i].coerceAtLeast(0f).toDouble()
+            val p = Math.pow(v, 1.0 / T)
+            powered[i] = p
+            sum += p
         }
-
-        val probs = FloatArray(logits.size)
+        val out = FloatArray(probsIn.size)
         if (sum == 0.0) {
-            // extremely defensive: fall back to uniform
-            val u = 1.0f / logits.size
-            for (i in logits.indices) probs[i] = u
-            return probs
+            val u = 1f / probsIn.size
+            for (i in out.indices) out[i] = u
+        } else {
+            for (i in out.indices) out[i] = (powered[i] / sum).toFloat()
         }
-        for (i in logits.indices) {
-            probs[i] = (exps[i] / sum).toFloat()
-        }
-        return probs
+        return out
     }
 
-    /** Entropy in nats. */
     private fun entropy(probs: FloatArray): Float {
         var h = 0.0
         for (p in probs) if (p > 0f) h -= (p.toDouble() * ln(p.toDouble()))
         return h.toFloat()
     }
 
-    /** Normalized entropy in 0..1 (divides by ln(K)). */
     private fun normalizedEntropy(probs: FloatArray): Float {
         val h = entropy(probs)
         val k = probs.size.toDouble()
@@ -258,20 +227,15 @@ class TFLiteClassifier private constructor(
         return if (hMax > 0.0) (h / hMax).toFloat() else 0f
     }
 
-    /** Efficiently decode large images with downsampling. */
     private fun decodeScaled(context: Context, uri: Uri, maxDim: Int): Bitmap? {
         val resolver = context.contentResolver
-
-        // 1) Bounds pass
         val optsBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, optsBounds) }
-
-        val (w, h) = optsBounds.outWidth to optsBounds.outHeight
+        val w = optsBounds.outWidth
+        val h = optsBounds.outHeight
         if (w <= 0 || h <= 0) {
             return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
         }
-
-        // 2) Compute inSampleSize (power-of-two downscale to <= maxDim)
         var sample = 1
         var tw = w
         var th = h
@@ -280,8 +244,6 @@ class TFLiteClassifier private constructor(
             tw /= 2
             th /= 2
         }
-
-        // 3) Decode with sampling
         val opts = BitmapFactory.Options().apply {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
