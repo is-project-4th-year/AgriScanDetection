@@ -445,7 +445,7 @@ private fun ScanScreen(
                 // slightly smaller to free some width; you can keep 72.dp if you prefer
                 modifier = Modifier.size(72.dp),
                 contentPadding = PaddingValues(0.dp)
-            ) { Text("Take Photo") }
+            ) { Text("Take Photo") } // 13/11/2025
 
             // Push the actions group to the right and let it use remaining width
             Spacer(Modifier.weight(1f))
