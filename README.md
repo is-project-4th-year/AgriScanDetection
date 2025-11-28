@@ -39,7 +39,6 @@ AgriScan is an Android app that helps smallholder farmers diagnose crop leaf dis
 ---
 
 ## App Screens
-> 📸 **Where to place images:** Put PNG/JPG screenshots in `docs/screens/` and keep the file names from the placeholders below (or update the paths here).
 
 - **Capture** — take/select leaf photo  
   `docs/screens/capture.png`  
