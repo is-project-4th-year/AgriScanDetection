@@ -43,23 +43,23 @@ AgriScan is an Android app that helps smallholder farmers diagnose crop leaf dis
 
 - **Capture** — take/select leaf photo  
   `docs/screens/capture.png`  
-  ![Capture](docs/screens/capture.png)
+  ![Capture](docs/screens/capture.jpeg)
 
 - **Diagnosis** — top-3 predictions + confidence + quick actions  
   `docs/screens/diagnosis.png`  
-  ![Diagnosis](docs/screens/diagnosis.png)
+  ![Diagnosis](docs/screens/diagnosis.jpeg)
 
 - **Knowledge Assistant (RAG)** — offline guidance tied to prediction  
   `docs/screens/knowledge.png`  
-  ![Knowledge Assistant](docs/screens/knowledge.png)
+  ![Knowledge Assistant](docs/screens/knowledge.jpeg)
 
 - **Fields** — organize observations by field/plot; view history  
   `docs/screens/fields.png`  
-  ![Fields](docs/screens/fields.png)
+  ![Fields](docs/screens/fields.jpeg)
 
 - **Library** — gallery of captured images and saved diagnoses  
   `docs/screens/library.png`  
-  ![Library](docs/screens/library.png)
+  ![Library](docs/screens/library.jpeg)
 
 ---
 
