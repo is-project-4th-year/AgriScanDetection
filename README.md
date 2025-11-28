@@ -1,5 +1,5 @@
 # AgriScan 🌿📱
-**Intelligent Plant Disease Detection on Android (Offline, On-Device ML + RAG Knowledge Assistant)**
+**An Intelligent Tomatoes, Potatoes and Pepper Bell Disease Detection Using a CNN Model and RAG Agent for Advisory.**
 
 [![Android](https://img.shields.io/badge/Android-15%20(targetSdk%2036)-3DDC84?logo=android&logoColor=white)]()
 [![Kotlin](https://img.shields.io/badge/Kotlin-1.9.x-7F52FF?logo=kotlin&logoColor=white)]()
@@ -60,8 +60,6 @@ AgriScan is an Android app that helps smallholder farmers diagnose crop leaf dis
 - **Library** — gallery of captured images and saved diagnoses  
   `docs/screens/library.png`  
   ![Library](docs/screens/library.png)
-
-> Tip: Use device frames or plain screenshots. Keep width ~800–1200px for best GitHub rendering.
 
 ---
 
@@ -131,97 +129,97 @@ git clone https://github.com/<your-username>/Agriscan.git
 cd Agriscan
 
 ```
-Configuration: Assets
+## Configuration: Assets
 
-Place the three assets here:
+### Place the three assets here:
 app/src/main/assets/
 ├─ model_int32.tflite      # preferred on-device model
 ├─ labels.txt             # class names (line-delimited; order = training order)
 └─ kb.jsonl               # offline knowledge base (JSON Lines)
 
-kb.jsonl format (one JSON per line):
+### kb.jsonl format (one JSON per line):
 {"id":"tomato_late_blight","title":"Tomato — Late Blight","symptoms":["water-soaked lesions","white mold"],"advice":["Remove infected leaves","Use copper-based fungicide"],"notes":"Short, farmer-facing description"}
 {"id":"potato_early_blight","title":"Potato — Early Blight","symptoms":["concentric rings"],"advice":["Rotate crops","Improve airflow"],"notes":"…"}
 
 ---
-Room Database
+## Room Database
 
-Name: agriscan.db
+-> Name: agriscan.db
 
-Location at runtime:
+-> Location at runtime:
 /data/data/com.example.agriscan/databases/agriscan.db (use Device File Explorer to inspect)
 
-Entities (example):
+-> Entities (example):
 
-Observation(id, imagePath, crop, top1Label, top1Conf, top3Json, adviceIds, fieldId, notes, createdAt, lat, lon)
+  . Observation(id, imagePath, crop, top1Label, top1Conf, top3Json, adviceIds, fieldId, notes, createdAt, lat, lon)
 
-Field(id, name, crop, location, notes, createdAt)
+  . Field(id, name, crop, location, notes, createdAt)
 
-Images: Saved to the app’s internal files directory; Room stores file paths, not blobs.
-
----
-Build & Run
-
-Open project in Android Studio.
-
-Ensure assets/ contains model_int32.tflite, labels.txt, kb.jsonl.
-
-Click Run ▶ (physical device recommended).
-
-Gradle (library hints) — already in project, but for reference:
-// Compose
-implementation(platform("androidx.compose:compose-bom:2024.10.01"))
-implementation("androidx.compose.ui:ui")
-implementation("androidx.compose.material3:material3")
-implementation("androidx.navigation:navigation-compose:2.8.0")
-
-// Image loading
-implementation("io.coil-kt:coil-compose:2.6.0")
-
-// Room
-implementation("androidx.room:room-runtime:2.6.1")
-kapt("androidx.room:room-compiler:2.6.1")
-implementation("androidx.room:room-ktx:2.6.1")
-
-// TFLite
-implementation("org.tensorflow:tensorflow-lite:2.14.0")
-implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+-> Images: Saved to the app’s internal files directory; Room stores file paths, not blobs.
 
 ---
-Results
+### Build & Run
 
-Validation (best checkpoint): ~0.9373 accuracy
+### Open project in Android Studio.
 
-Held-out Test Set: 0.9345 accuracy
-Per-class precision/recall/F1 and confusion matrix are exported by the Colab script:
+-> Ensure assets/ contains model_int32.tflite, labels.txt, kb.jsonl.
 
-agriscan_runs/<timestamp>/classification_report.txt
+-> Click Run ▶ (physical device recommended).
 
-agriscan_runs/<timestamp>/confusion_matrix.png
+-> Gradle (library hints) — already in project, but for reference:
+  // Compose
+  implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+  implementation("androidx.compose.ui:ui")
+  implementation("androidx.compose.material3:material3")
+  implementation("androidx.navigation:navigation-compose:2.8.0")
 
-Why Top-3: plant diseases often exhibit overlapping visual symptoms; presenting the top-3 with calibrated confidence reduces false certainty and gives farmers safer options.
+  // Image loading
+  implementation("io.coil-kt:coil-compose:2.6.0")
 
----
-Roadmap
+  // Room
+  implementation("androidx.room:room-runtime:2.6.1")
+  kapt("androidx.room:room-compiler:2.6.1")
+  implementation("androidx.room:room-ktx:2.6.1")
 
-On-device explanations (Grad-CAM-like heatmaps)
-
-Batch capture and offline queueing
-
-Per-field trend analytics and seasonal insights
-
-Localization and low-literacy UX modes
-
----
-Acknowledgements
-
-PlantVillage dataset (research use)
-
-TensorFlow Lite & MobileNetV2
-
-Jetpack libraries (Compose, Navigation, Room)
+  // TFLite
+  implementation("org.tensorflow:tensorflow-lite:2.14.0")
+  implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
 ---
-License
+## Results
+
+### Validation (best checkpoint): ~0.9373 accuracy
+
+### Held-out Test Set: 0.9345 accuracy
+-> Per-class precision/recall/F1 and confusion matrix are exported by the Colab script:
+
+  . agriscan_runs/<timestamp>/classification_report.txt
+  
+  . agriscan_runs/<timestamp>/confusion_matrix.png
+
+### Why Top-3: plant diseases often exhibit overlapping visual symptoms; presenting the top-3 with calibrated confidence reduces false certainty and gives farmers safer options.
+
+---
+## Roadmap
+
+. On-device explanations (Grad-CAM-like heatmaps)
+
+. Batch capture and offline queueing
+
+. Per-field trend analytics and seasonal insights
+
+. Localization and low-literacy UX modes
+
+---
+## Acknowledgements
+
+. PlantVillage dataset (research use)
+
+. TensorFlow Lite & MobileNetV2
+
+. Jetpack libraries (Compose, Navigation, Room)
+
+---
+## License
 
 This project is licensed under the MIT License.
